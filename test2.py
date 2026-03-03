@@ -1,0 +1,166 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+
+# =====================================
+# 1. 시스템 파라미터
+# =====================================
+dt = 0.01
+K = np.diag([5.0, 4.0, 3.0])
+D = np.diag([1.0, 0.8, 0.6])
+
+# =====================================
+# 2. True Dynamics (Ground Truth)
+# =====================================
+def true_dynamics(q, qdot, tau):
+    qddot = -K @ q - D @ qdot + tau
+    qdot_next = qdot + dt * qddot
+    q_next = q + dt * qdot_next
+    return q_next, qdot_next
+
+# =====================================
+# 3. 데이터 생성
+# =====================================
+N = 30000
+
+X = []
+Y = []
+
+q = np.zeros(3)
+qdot = np.zeros(3)
+
+for i in range(N):
+    tau = np.random.uniform(-2, 2, 3)
+    
+    q_next, qdot_next = true_dynamics(q, qdot, tau)
+    
+    x = np.concatenate([q, qdot, tau])       # 9차원
+    y = np.concatenate([q_next, qdot_next])  # 6차원
+    
+    X.append(x)
+    Y.append(y)
+    
+    q = q_next
+    qdot = qdot_next
+
+X = np.array(X)
+Y = np.array(Y)
+
+# =====================================
+# 4. PyTorch 준비
+# =====================================
+X_tensor = torch.tensor(X, dtype=torch.float32)
+Y_tensor = torch.tensor(Y, dtype=torch.float32)
+
+dataset = torch.utils.data.TensorDataset(X_tensor, Y_tensor)
+loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
+
+# =====================================
+# 5. DNN 모델 정의
+# =====================================
+class DynamicsNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(9, 128),
+            nn.Tanh(),
+            nn.Linear(128, 64),
+            nn.Tanh(),
+            nn.Linear(64, 6)
+        )
+        
+    def forward(self, x):
+        return self.model(x)
+
+model = DynamicsNet()
+
+# =====================================
+# 6. 학습
+# =====================================
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+epochs = 50
+
+for epoch in range(epochs):
+    total_loss = 0
+    
+    for xb, yb in loader:
+        pred = model(xb)
+        loss = criterion(pred, yb)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+    
+    print(f"Epoch {epoch+1}, Loss: {total_loss/len(loader):.8f}")
+
+# =====================================
+# 7. 1-step 예측 테스트
+# =====================================
+test_x = X_tensor[0:1]
+true_y = Y_tensor[0:1]
+pred_y = model(test_x)
+
+print("\n1-Step Prediction Test")
+print("True :", true_y.detach().numpy())
+print("Pred :", pred_y.detach().numpy())
+
+# =====================================
+# 8. Multi-step Rollout 비교
+# =====================================
+T_test = 5.0
+steps = int(T_test / dt)
+
+q_true = np.zeros(3)
+qdot_true = np.zeros(3)
+
+q_nn = np.zeros(3)
+qdot_nn = np.zeros(3)
+
+true_history = []
+nn_history = []
+
+for i in range(steps):
+    tau = np.random.uniform(-2, 2, 3)
+    
+    # True system
+    q_true, qdot_true = true_dynamics(q_true, qdot_true, tau)
+    true_history.append(q_true.copy())
+    
+    # NN prediction
+    inp = np.concatenate([q_nn, qdot_nn, tau])
+    inp_tensor = torch.tensor(inp, dtype=torch.float32).unsqueeze(0)
+    
+    out = model(inp_tensor).detach().numpy()[0]
+    
+    q_nn = out[:3]
+    qdot_nn = out[3:]
+    
+    nn_history.append(q_nn.copy())
+
+true_history = np.array(true_history)
+nn_history = np.array(nn_history)
+
+# =====================================
+# 9. 결과 비교 플롯
+# =====================================
+time = np.linspace(0, T_test, steps)
+
+plt.figure()
+plt.plot(time, true_history[:,0], label="True q1")
+plt.plot(time, nn_history[:,0], '--', label="NN q1")
+plt.plot(time, true_history[:,1], label="True q2")
+plt.plot(time, nn_history[:,1], '--', label="NN q2")
+plt.plot(time, true_history[:,2], label="True q3")
+plt.plot(time, nn_history[:,2], '--', label="NN q3")
+
+plt.xlabel("Time [s]")
+plt.ylabel("Joint Position [rad]")
+plt.title("True vs NN Multi-step Prediction")
+plt.legend()
+plt.show()
